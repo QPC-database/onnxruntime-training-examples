@@ -1,31 +1,38 @@
 import time
 import math
+from collections import Counter
+
 import torch
 import torch.nn as nn
+from torch.utils.data import DataLoader
+
 import torchtext
-from model import TransformerModel
 from torchtext.data.utils import get_tokenizer
+from torchtext.vocab import Vocab
+from torchtext.datasets import WikiText2
 
-basic_english_tokenizer=get_tokenizer("basic_english")
+from model import TransformerModel
 
-TEXT = torchtext.data.Field(tokenize=basic_english_tokenizer,
-                            init_token='<sos>',
-                            eos_token='<eos>',
-                            lower=True)
+train_iter = WikiText2(split='train')
+tokenizer = get_tokenizer('basic_english')
+counter = Counter()
+for line in train_iter:
+    counter.update(tokenizer(line))
+vocab = Vocab(counter)
 
-train_txt, val_txt, test_txt = torchtext.datasets.WikiText2.splits(TEXT)
-TEXT.build_vocab(train_txt)
+def data_process(raw_text_iter):
+    data = [torch.tensor([vocab[token] for token in tokenizer(item)],
+                         dtype=torch.long) for item in raw_text_iter]
+    return torch.cat(tuple(filter(lambda t: t.numel() > 0, data)))
+
+train_iter, val_iter, test_iter = WikiText2()
+train_data = data_process(train_iter)
+val_data = data_process(val_iter)
+test_data = data_process(test_iter)
+
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-bptt = 35
-def get_batch(source, i):
-    seq_len = min(bptt, len(source) - 1 - i)
-    data = source[i:i+seq_len]
-    target = source[i+1:i+1+seq_len].view(-1)
-    return data, target
-
 def batchify(data, bsz):
-    data = TEXT.numericalize([data.examples[0].text])    
     # Divide the dataset into bsz parts.
     nbatch = data.size(0) // bsz
     # Trim off any extra elements that wouldn't cleanly fit (remainders).
@@ -36,11 +43,18 @@ def batchify(data, bsz):
 
 batch_size = 20
 eval_batch_size = 10
-train_data = batchify(train_txt, batch_size)
-val_data = batchify(val_txt, eval_batch_size)
-test_data = batchify(test_txt, eval_batch_size)
+train_data = batchify(train_data, batch_size)
+val_data = batchify(val_data, eval_batch_size)
+test_data = batchify(test_data, eval_batch_size)
 
-ntokens = len(TEXT.vocab.stoi) # the size of vocabulary
+bptt = 35
+def get_batch(source, i):
+    seq_len = min(bptt, len(source) - 1 - i)
+    data = source[i:i+seq_len]
+    target = source[i+1:i+1+seq_len].reshape(-1)
+    return data, target
+
+ntokens = len(vocab.stoi) # the size of vocabulary
 emsize = 200 # embedding dimension
 nhid = 200 # the dimension of the feedforward network model in nn.TransformerEncoder
 nlayers = 2 # the number of nn.TransformerEncoderLayer in nn.TransformerEncoder
@@ -57,11 +71,13 @@ def train():
     model.train() # Turn on the train mode
     total_loss = 0.
     start_time = time.time()
-    ntokens = len(TEXT.vocab.stoi)
+    src_mask = model.generate_square_subsequent_mask(bptt).to(device)
     for batch, i in enumerate(range(0, train_data.size(0) - 1, bptt)):
         data, targets = get_batch(train_data, i)
         optimizer.zero_grad()
-        output = model(data)
+        if data.size(0) != bptt:
+            src_mask = model.generate_square_subsequent_mask(data.size(0)).to(device)
+        output = model(data, src_mask)
         loss = criterion(output.view(-1, ntokens), targets)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
@@ -75,25 +91,25 @@ def train():
             print('| epoch {:3d} | {:5d}/{:5d} batches | '
                   'lr {:02.2f} | ms/batch {:5.2f} | '
                   'loss {:5.2f} | ppl {:8.2f}'.format(
-                    epoch, batch, len(train_data) // bptt, scheduler.get_last_lr()[0],
-                    elapsed * 1000 / log_interval,
-                    cur_loss, math.exp(cur_loss)))
+                      epoch, batch, len(train_data) // bptt, scheduler.get_lr()[0],
+                      elapsed * 1000 / log_interval,
+                      cur_loss, math.exp(cur_loss)))
             total_loss = 0
             start_time = time.time()
 
 def evaluate(eval_model, data_source):
     eval_model.eval() # Turn on the evaluation mode
     total_loss = 0.
-    ntokens = len(TEXT.vocab.stoi)
+    src_mask = model.generate_square_subsequent_mask(bptt).to(device)
     with torch.no_grad():
         for i in range(0, data_source.size(0) - 1, bptt):
             data, targets = get_batch(data_source, i)
-            output = eval_model(data)
+            if data.size(0) != bptt:
+                src_mask = model.generate_square_subsequent_mask(data.size(0)).to(device)
+            output = eval_model(data, src_mask)
             output_flat = output.view(-1, ntokens)
             total_loss += len(data) * criterion(output_flat, targets).item()
     return total_loss / (len(data_source) - 1)
-
-
 
 best_val_loss = float("inf")
 epochs = 3 # The number of epochs
@@ -118,12 +134,5 @@ for epoch in range(1, epochs + 1):
 test_loss = evaluate(best_model, test_data)
 print('=' * 89)
 print('| End of training | test loss {:5.2f} | test ppl {:8.2f}'.format(
-    test_loss, math.exp(test_loss)))
+        test_loss, math.exp(test_loss)))
 print('=' * 89)
-
-
-
-
-
-
-

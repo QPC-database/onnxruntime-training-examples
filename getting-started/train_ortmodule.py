@@ -62,29 +62,27 @@ nhid = 200 # the dimension of the feedforward network model in nn.TransformerEnc
 nlayers = 2 # the number of nn.TransformerEncoderLayer in nn.TransformerEncoder
 nhead = 2 # the number of heads in the multiheadattention models
 dropout = 0.2 # the dropout value
-pt_model = TransformerModel(ntokens, emsize, nhead, nhid, nlayers, dropout).to(device)
-#model = ORTModule(TransformerModel(ntokens, emsize, nhead, nhid, nlayers, dropout).to(device))
-ort_model = ORTModule(pt_model)
+model = ORTModule(TransformerModel(ntokens, emsize, nhead, nhid, nlayers, dropout).to(device))
 
 criterion = nn.CrossEntropyLoss()
 lr = 5.0 # learning rate
-optimizer = torch.optim.SGD(ort_model.parameters(), lr=lr)
+optimizer = torch.optim.SGD(model.parameters(), lr=lr)
 scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 1.0, gamma=0.95)
 
 def train():
-    ort_model.train() # Turn on the train mode
+    model.train() # Turn on the train mode
     total_loss = 0.
     start_time = time.time()
-    src_mask = pt_model.generate_square_subsequent_mask(bptt).to(device)
+    src_mask = model._original_module.generate_square_subsequent_mask(bptt).to(device)
     for batch, i in enumerate(range(0, train_data.size(0) - 1, bptt)):
         data, targets = get_batch(train_data, i)
         optimizer.zero_grad()
         if data.size(0) != bptt:
-            src_mask = pt_model.generate_square_subsequent_mask(data.size(0)).to(device)
-        output = ort_model(data, src_mask)
+            src_mask = model._original_module.generate_square_subsequent_mask(data.size(0)).to(device)
+        output = model(data, src_mask)
         loss = criterion(output.view(-1, ntokens), targets)
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(ort_model.parameters(), 0.5)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
         optimizer.step()
 
         total_loss += loss.item()
@@ -104,12 +102,12 @@ def train():
 def evaluate(eval_model, data_source):
     eval_model.eval() # Turn on the evaluation mode
     total_loss = 0.
-    src_mask = pt_model.generate_square_subsequent_mask(bptt).to(device)
+    src_mask = model._original_module.generate_square_subsequent_mask(bptt).to(device)
     with torch.no_grad():
         for i in range(0, data_source.size(0) - 1, bptt):
             data, targets = get_batch(data_source, i)
             if data.size(0) != bptt:
-                src_mask = pt_model.generate_square_subsequent_mask(data.size(0)).to(device)
+                src_mask = model._original_module.generate_square_subsequent_mask(data.size(0)).to(device)
             output = eval_model(data, src_mask)
             output_flat = output.view(-1, ntokens)
             total_loss += len(data) * criterion(output_flat, targets).item()
@@ -122,7 +120,7 @@ best_model = None
 for epoch in range(1, epochs + 1):
     epoch_start_time = time.time()
     train()
-    val_loss = evaluate(ort_model, val_data)
+    val_loss = evaluate(model, val_data)
     print('-' * 89)
     print('| end of epoch {:3d} | time: {:5.2f}s | valid loss {:5.2f} | '
           'valid ppl {:8.2f}'.format(epoch, (time.time() - epoch_start_time),
@@ -131,7 +129,7 @@ for epoch in range(1, epochs + 1):
 
     if val_loss < best_val_loss:
         best_val_loss = val_loss
-        best_model = ort_model
+        best_model = model
 
     scheduler.step()
 
